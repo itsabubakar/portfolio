@@ -1,0 +1,56 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {} # allow manual runs from the Actions tab
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for context)
+        uses: actions/checkout@v4
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.DEPLOY_USER || 'ubuntu' }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          # Optional strict host key pinning (add the secret if you set it)
+          host_fingerprint: ${{ secrets.SERVER_FINGERPRINT }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            export PATH="$PATH:/usr/local/bin"   # make sure pnpm/pm2 are found
+
+            BRANCH="main"
+            APP_DIR="/var/www/app/portfolio"
+
+            cd "$APP_DIR"
+
+            # get latest code (discard local changes on the server)
+            git fetch --all --prune
+            git checkout "$BRANCH"
+            git reset --hard "origin/$BRANCH"
+
+            # install + build with pnpm
+            if ! command -v pnpm >/dev/null 2>&1; then
+              sudo npm i -g pnpm
+            fi
+            pnpm install --frozen-lockfile
+            pnpm build
+            pnpm prune --prod
+
+            # start once if not running; otherwise reload
+            if pm2 describe playground >/dev/null 2>&1; then
+              pm2 reload playground --update-env
+            else
+              pm2 start "pnpm start -p 3000 -H 127.0.0.1" --name playground
+            fi
+            pm2 save
